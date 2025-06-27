@@ -16,41 +16,89 @@ require 'yaml'
 # make a new name for the file, so instead we'll create the plex scaffolding
 # and then cd into each + run the commands that way?
 class TranscodeBatchRunner
-  def self.run(dry: false, show_out: true, show_err: true, pwd: Dir.pwd)
-    if config_path.nil?
-      warn 'No config file found in pwd titled batch.yml or batch.yaml'
-      exit 1
+  class << self
+    def run(dry: false, show_out: true, show_err: true, pwd: Dir.pwd, keep_logs: false)
+      if config_path.nil?
+        warn 'No config file found in pwd titled batch.yml or batch.yaml'
+        exit 1
+      end
+
+      VideoConfig.for(File.join(pwd, config_path)).each do |config|
+        output_path = config.output_path(pwd)
+        FileUtils.mkdir_p(output_path) unless Dir.exist?(output_path)
+
+
+        Dir.chdir(output_path) do
+          vt_target = VideoTranscoding::Target.new(config)
+          CmdExecute.run(vt_target.command, show_out: show_out, show_err: show_err, dry: dry)
+          move_file(config.src_filename, config.output_filename, dry: dry) unless config.src_filename == config.output_filename
+          MkvPropEdit.set_title(config.output_full_path(pwd), title: config.title_with_parent, dry: dry) if File.exist?(config.output_full_path(pwd))
+        end
+      end
+
+      Cleaner.new(pwd).cleanup!(pwd: pwd)
     end
 
-    configs = VideoConfig.for(File.join(pwd, config_path))
+    def config_path(pwd: Dir.pwd)
+      @@config_path ||= ['batch.yml', 'batch.yaml'].find { |p| File.exist?(File.join(pwd, p)) }
+    end
 
-    configs.each do |config|
-      output_path = config.output_path(pwd)
-      FileUtils.mkdir_p(output_path) unless Dir.exist?(output_path)
+    def config_exists?(pwd: Dir.pwd)
+      !config_path.nil? && File.exist?(config_path)
+    end
 
-      vt_target = VideoTranscoding::Target.new(config)
+    def move_file(src, dest, dry: false)
+      if dry
+        puts "[FileUtils.mv] mv #{src} #{dest}"
+      else
+        FileUtils.mv(src, dest)
+      end
+    end
 
-      Dir.chdir(output_path) do
-        CmdExecute.run(vt_target.command, show_out: show_out, show_err: show_err, dry: dry)
-        move_file(config.src_filename, config.output_filename, dry: dry) unless config.src_filename == config.output_filename
-        MkvPropEdit.set_title(config.output_full_path(pwd), title: config.title_with_parent, dry: dry) if File.exist?(config.output_full_path(pwd))
+    def cleanup!(pwd: Dir.pwd)
+      Find.find(pwd) do |path|
+        if File.extname(path) == '.log'
+          FileUtils.rm_rf(path)
+        end
       end
     end
   end
+end
 
-  def self.config_path(pwd: Dir.pwd)
-    @@config_path ||= ['batch.yml', 'batch.yaml'].find { |p| File.exist?(File.join(pwd, p)) }
+class Cleaner
+  def initialize(pwd = Dir.pwd)
+    @pwd = pwd
   end
 
-  def self.config_exists?(pwd: Dir.pwd)
-    !config_path.nil? && File.exist?(config_path)
+  def cleanup!
+    save_subtitles!
+    save_logs!
   end
 
-  def self.move_file(src, dest, dry: false)
-    if dry
-      puts "[FileUtils.mv] mv #{src} #{dest}"
-    else
-      FileUtils.mv(src, dest)
+  def save_logs!(clean: true)
+    outdir = File.join(@pwd, VideoConfig::OUTPUT_DIRNAME, 'logs')
+    FileUtils.mkdir_p(outdir) unless Dir.exist?(outdir)
+
+    Find.find(@pwd) do |path|
+      next unless File.extname(path) == '.log'
+
+      FileUtils.cp(path, outdir)
+      FileUtils.rm_f(path) if clean
+    end
+  end
+
+  def save_subtitles!(clean: false)
+    outdir = File.join(@pwd, VideoConfig::OUTPUT_DIRNAME, 'subtitles')
+    FileUtils.mkdir_p(outdir) unless Dir.exist?(outdir)
+
+    sub_extensions = ['.srt', 'sup', '.sub', '.idx', '.ass']
+
+    Find.find(@pwd) do |path|
+      if sub_extensions.any? { |ext| ext == File.extname(path) }
+        FileUtils.cp(path, outdir)
+
+        FiltUtils.rm_f(path) if clean
+      end
     end
   end
 end

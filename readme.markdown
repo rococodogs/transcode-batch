@@ -10,6 +10,22 @@ to create plex-compatible directories for dvd/bd rips of movies + extras.
 - [video_transcoding] and [its dependencies](https://github.com/lisamelton/video_transcoding?tab=readme-ov-file#installation) in your path
 - a directory of mkv files extracted from [makemkv](https://www.makemkv.com/)
 
+```
+$ tree .
+.
+├── 28 Days Later.mkv
+├── 28 Days Later.srt
+├── Alternate Ending.mkv
+├── batch.yml
+├── Continuity Polaroids.mkv
+├── Making Of Featurette.mkv
+├── output/
+├── Theatrical Trailer.mkv
+
+1 directory, 7 files
+```
+
+
 ### create a `batch.yml` file
 
 ```yaml

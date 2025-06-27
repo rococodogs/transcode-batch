@@ -1,0 +1,38 @@
+# top-level keys:
+#   :title => string (uses filename basename otherwise)
+#   :edition => string (appended to filename when present)
+#   :audio => array (track configs)
+#   :subtitles => array (hash configs)
+#   :video => hash (config)
+#   :extras => hash (file name keys, config hash)
+#   :mp4 => true/false (default false)
+#   :src (if different than key i guess?)
+
+28 Days Later.mkv:
+  title: 28 Days Later (2003)
+  edition: Widescreen DVD
+  audio:
+    - title: English
+    - track: 4
+      title: Commentary with director Danny Boyle and writer Alex Garland
+  subtitles:
+    28 Days Later.srt:
+      language: eng
+      encoding: utf8
+  extras:
+    Making Of Featurette.mkv:
+      type: featurette
+      audio:
+        - title: English
+    Alternate Ending.mkv:
+      type: deleted
+      audio:
+        - title: English
+    Theatrical Trailer.mkv:
+      type: trailer
+      audio:
+        - title: English
+    Continuity Polaroids.mkv:
+      type: bts
+      audio:
+        - title: English

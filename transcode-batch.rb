@@ -27,7 +27,6 @@ class TranscodeBatchRunner
         output_path = config.output_path(pwd)
         FileUtils.mkdir_p(output_path) unless Dir.exist?(output_path)
 
-
         Dir.chdir(output_path) do
           vt_target = VideoTranscoding::Target.new(config)
           CmdExecute.run(vt_target.command, show_out: show_out, show_err: show_err, dry: dry)
@@ -36,7 +35,7 @@ class TranscodeBatchRunner
         end
       end
 
-      Cleaner.new(pwd).cleanup!(pwd: pwd)
+      Cleaner.new(pwd, dry: dry).cleanup!
     end
 
     def config_path(pwd: Dir.pwd)
@@ -54,25 +53,18 @@ class TranscodeBatchRunner
         FileUtils.mv(src, dest)
       end
     end
-
-    def cleanup!(pwd: Dir.pwd)
-      Find.find(pwd) do |path|
-        if File.extname(path) == '.log'
-          FileUtils.rm_rf(path)
-        end
-      end
-    end
   end
 end
 
 class Cleaner
-  def initialize(pwd = Dir.pwd)
+  def initialize(pwd = Dir.pwd, dry: false)
     @pwd = pwd
+    @dry = dry
   end
 
   def cleanup!
-    save_subtitles!
-    save_logs!
+    save_subtitles! unless @dry
+    save_logs! unless @dry
   end
 
   def save_logs!(clean: true)
@@ -267,7 +259,7 @@ class VideoConfig
   end
 
   def subtitles
-    config[:subtitles] || {}
+    @subtitles ||= setup_subtitles
   end
 
   def title
@@ -300,6 +292,38 @@ class VideoConfig
       config[:type] ||= :other
       self.class.new(src, config, parent: self)
     end
+  end
+
+  # supports hash and array style yaml config
+  #
+  # @example subtitles as hash
+  #   28 Days Later.mkv:
+  #     subtitles:
+  #       28 Days Later.eng.srt:
+  #         language: eng
+  #         encoding utf8
+  #       28 Days Later.fre.srt:
+  #         language: fre
+  #
+  # @example subtitles as array for eng/utf8-encoded sub files,
+  #   28 Days Later.mkv:
+  #     subtitles:
+  #       - 28 Days Later.eng.srt
+  #       - 28 Days Later.eng-sdh.srt
+  #       - 28 Days Later.fre.srt:
+  #           language: fre
+  SubtitleConfig = Struct.new(:file, :language, :encoding)
+
+  def setup_subtitles
+    config.fetch(:subtitles, []).to_a.map do |sub_cnf|
+      case sub_cnf
+      when String
+        SubtitleConfig.new(sub_cnf, 'eng', 'utf8')
+      when Array, Hash
+        file, cnf = sub_cnf.to_a
+        SubtitleConfig.new(file.to_s, cnf.fetch(:language, 'eng'), cnf.fetch(:encoding, 'utf8'))
+      end
+    end.compact
   end
 end
 
@@ -345,9 +369,9 @@ class VideoTranscoding
       src_dir = File.dirname(config.src)
 
       # src paths need to be relative
-      files = config.subtitles.keys.map { |k| %("#{File.join(src_dir, k.to_s)}") }.join(',')
-      langs = config.subtitles.values.collect { |v| v[:language] || v[:lang] || 'eng' }.join(',')
-      encodings = config.subtitles.values.collect { |v| v[:encoding] || 'utf8' }.join(',')
+      files = config.subtitles.map { |sub| %("#{File.join(src_dir, sub.file)}") }.join(',')
+      langs = config.subtitles.map { |sub| sub.language }.join(',')
+      encodings = config.subtitles.map { |sub| sub.encoding }.join(',')
 
       [
         "-x srt-file=#{files}",

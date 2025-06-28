@@ -36,6 +36,9 @@ $ tree .
   # appends "{edition-<value>}" to filename (used in plex)
   edition: Widescreen DVD
 
+  # Toggle output to be .mp4 file instead of default .mkv
+  mp4: false
+
   # transcode_video defaults to adding the first track, so this can be empty
   # if you only want the main audio track. if 'track' isn't provided, it is assumed
   # that the track being added matches index + 1.
@@ -45,12 +48,17 @@ $ tree .
       title: Commentary with director Danny Boyle and writer Alex Garland
 
   # add external srt files with the relative path to each file as the key.
-  # language and encoding default to 'eng' and 'utf8', natch. no support for
-  # forced bc i always have subtitles on
+  # there is built in support with transcode-video for copying subtitles
+  # but i like the flexability of embedding a text file over an image.
+  #
+  # configs can be provided as an array of file strings (for english utf-8 files)
+  # or hashes specifying the 3-letter language code (defaults to eng) and
+  # file encoding (defaults to utf8). no support for forced bc i always have subtitles on
   subtitles:
-    28 Days Later.srt:
-      language: eng
-      encoding: utf8
+    - 28 Days Later.eng.srt
+    - 28 Days Later.fre.srt:
+        language: fre
+        encoding: utf8
 
   # extras videos are extracted to the project root and need to be moved to a
   # different output location depending on the type. default is 'other'.

@@ -1,13 +1,3 @@
-# top-level keys:
-#   :title => string (uses filename basename otherwise)
-#   :edition => string (appended to filename when present)
-#   :audio => array (track configs)
-#   :subtitles => array (hash configs)
-#   :video => hash (config)
-#   :extras => hash (file name keys, config hash)
-#   :mp4 => true/false (default false)
-#   :src (if different than key i guess?)
-
 28 Days Later.mkv:
   title: 28 Days Later (2003)
   edition: Widescreen DVD

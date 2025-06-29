@@ -30,12 +30,12 @@ class TranscodeBatchRunner
         Dir.chdir(output_path) do
           vt_target = VideoTranscoding::Target.new(config)
           CmdExecute.run(vt_target.command, show_out: show_out, show_err: show_err, dry: dry)
-          move_file(config.src_filename, config.output_filename, dry: dry) unless config.src_filename == config.output_filename
+          copy_file(config.src_filename, config.output_filename, dry: dry) unless config.src_filename == config.output_filename
           MkvPropEdit.set_title(config.output_full_path(pwd), title: config.title_with_parent, dry: dry) if File.exist?(config.output_full_path(pwd))
         end
-      end
 
-      Cleaner.new(pwd, dry: dry).cleanup!
+        Cleaner.new(config: config, pwd: pwd, dry: dry).cleanup!
+      end
     end
 
     def config_path(pwd: Dir.pwd)
@@ -46,18 +46,21 @@ class TranscodeBatchRunner
       !config_path.nil? && File.exist?(config_path)
     end
 
-    def move_file(src, dest, dry: false)
+    def copy_file(src, dest, dry: false)
       if dry
-        puts "[FileUtils.mv] mv #{src} #{dest}"
+        puts "[FileUtils.cp] cp #{src} #{dest}"
       else
-        FileUtils.mv(src, dest)
+        FileUtils.cp(src, dest)
       end
     end
   end
 end
 
+# Used to clear out transcode-video .log files + move subtitle files to
+# `output/subtitles` for archiving.
 class Cleaner
-  def initialize(pwd = Dir.pwd, dry: false)
+  def initialize(config:, pwd: Dir.pwd, dry: false)
+    @config = config
     @pwd = pwd
     @dry = dry
   end
@@ -67,29 +70,27 @@ class Cleaner
     save_logs! unless @dry
   end
 
-  def save_logs!(clean: true)
+  def save_logs!
     outdir = File.join(@pwd, VideoConfig::OUTPUT_DIRNAME, 'logs')
     FileUtils.mkdir_p(outdir) unless Dir.exist?(outdir)
 
     Find.find(@pwd) do |path|
       next unless File.extname(path) == '.log'
 
-      FileUtils.cp(path, outdir)
-      FileUtils.rm_f(path) if clean
+      FileUtils.cp(path, outdir) unless File.exist?(File.join(outdir, path.basename))
     end
   end
 
-  def save_subtitles!(clean: false)
-    outdir = File.join(@pwd, VideoConfig::OUTPUT_DIRNAME, 'subtitles')
+  def save_subtitles!
+    title = @config.has_parent? ? @config.parent.title : @config.title
+    outdir = File.join(@pwd, VideoConfig::OUTPUT_DIRNAME, 'subtitles', title)
     FileUtils.mkdir_p(outdir) unless Dir.exist?(outdir)
 
     sub_extensions = ['.srt', 'sup', '.sub', '.idx', '.ass']
 
     Find.find(@pwd) do |path|
       if sub_extensions.any? { |ext| ext == File.extname(path) }
-        FileUtils.cp(path, outdir)
-
-        FiltUtils.rm_f(path) if clean
+        FileUtils.cp(path, outdir) unless File.exist?(File.join(outdir, path.basename))
       end
     end
   end
@@ -129,12 +130,7 @@ end
 class MkvPropEdit
   def self.set_title(src, title: nil, show_out: true, show_err: true, dry: false)
     title = File.basename(src, '.*') if title.nil?
-    prop_commands = [
-      'mkvpropedit',
-      %("#{src.gsub('"', '\"')}"),
-      '--set',
-      %(title="#{title.gsub('"', '\"')}")
-    ].join(' ')
+    prop_commands = %(mkvpropedit "#{src.gsub('"', '\"')}" --set title="#{title.gsub('"', '\"')}")
 
     if dry
       puts "[MkvPropEdit.set_title]: #{prop_commands}"
@@ -369,9 +365,9 @@ class VideoTranscoding
       src_dir = File.dirname(config.src)
 
       # src paths need to be relative
-      files = config.subtitles.map { |sub| %("#{File.join(src_dir, sub.file)}") }.join(',')
-      langs = config.subtitles.map { |sub| sub.language }.join(',')
-      encodings = config.subtitles.map { |sub| sub.encoding }.join(',')
+      files = config.subtitles.map(&:file).map { |fn| %("#{File.join(src_dir, fn)}") }.join(',')
+      langs = config.subtitles.map(&:language).join(',')
+      encodings = config.subtitles.map(&:encoding).join(',')
 
       [
         "-x srt-file=#{files}",

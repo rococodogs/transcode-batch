@@ -5,10 +5,18 @@ to create plex-compatible directories for dvd/bd rips of movies + extras.
 
 ## how to
 
+## install
+
+clone the repository and ln `transcode-batch` to your bin directory.
+
 ### requirements
 
-- [video_transcoding] and [its dependencies](https://github.com/lisamelton/video_transcoding?tab=readme-ov-file#installation) in your path
-- a directory of mkv files extracted from [makemkv](https://www.makemkv.com/)
+- [video_transcoding] and its dependencies in your path
+  - `HandBrakeCLI`
+  - `ffprobe`
+  - `ffmpeg`
+- `mkvpropedit`
+- a directory of mkv files extracted from [makemkv](https://www.makemkv.com/) and srt subtitle files (i use `mkvextract` to pull the tracks and SubTools to OCR + correct the text. you could also use opensubs lol).
 
 ```
 $ tree .
@@ -87,9 +95,11 @@ $ tree .
 ### run transcode-batch
 
 ```bash
-cd /path/to/makemkv/payload
-/path/to/transcode-batch.rb
+cd /path/to/bd-rip-files
+transcode-batch
 ```
+
+use `--dry` flag to view the transcode-video commands that will be run without executing them
 
 ### enjoy your new rip
 

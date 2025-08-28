@@ -30,7 +30,7 @@ class TranscodeBatchRunner
         Dir.chdir(output_path) do
           vt_target = VideoTranscoding::Target.new(config)
           CmdExecute.run(vt_target.command, show_out: show_out, show_err: show_err, dry: dry)
-          copy_file(config.src_filename, config.output_filename, dry: dry) unless config.src_filename == config.output_filename
+          rename_file(config.src_filename, config.output_filename, dry: dry) unless config.output_filename == config.src_filename
           MkvPropEdit.set_title(config.output_full_path(pwd), title: config.title_with_parent, dry: dry) if File.exist?(config.output_full_path(pwd))
         end
 
@@ -39,18 +39,18 @@ class TranscodeBatchRunner
     end
 
     def config_path(pwd: Dir.pwd)
-      @@config_path ||= ['batch.yml', 'batch.yaml'].find { |p| File.exist?(File.join(pwd, p)) }
+      @@config_path ||= Find.find(pwd) { |path| break path if path.to_s.match?(/(.*\.)?batch\.ya?ml$/) }
     end
 
     def config_exists?(pwd: Dir.pwd)
       !config_path.nil? && File.exist?(config_path)
     end
 
-    def copy_file(src, dest, dry: false)
+    def rename_file(src, dest, dry: false)
       if dry
-        puts "[FileUtils.cp] cp #{src} #{dest}"
+        puts "[FileUtils.mv] mv #{src} #{dest}"
       else
-        FileUtils.cp(src, dest)
+        FileUtils.mv(src, dest)
       end
     end
   end
@@ -68,6 +68,10 @@ class Cleaner
   def cleanup!
     save_subtitles! unless @dry
     save_logs! unless @dry
+  rescue => e
+    puts "[WARN] encountered an error during cleanup: #{e.message}"
+    puts e.backtrack.split('\n').map { |line| "  #{line}" }.join('\n')
+    puts "[WARN] moving on"
   end
 
   def save_logs!
@@ -86,11 +90,11 @@ class Cleaner
     outdir = File.join(@pwd, VideoConfig::OUTPUT_DIRNAME, 'subtitles', title)
     FileUtils.mkdir_p(outdir) unless Dir.exist?(outdir)
 
-    sub_extensions = ['.srt', 'sup', '.sub', '.idx', '.ass']
+    sub_extensions = ['.srt', '.sup', '.sub', '.idx', '.ass']
 
     Find.find(@pwd) do |path|
       if sub_extensions.any? { |ext| ext == File.extname(path) }
-        FileUtils.cp(path, outdir) unless File.exist?(File.join(outdir, path.basename))
+        FileUtils.cp(path, outdir) unless File.exist?(File.join(outdir, File.basename(path)))
       end
     end
   end
@@ -103,6 +107,7 @@ class CmdExecute
       if dry
         puts "[CmdExecute.run] #{cmd}"
       else
+        puts "[CmdExecute.run] running #{cmd}"
         Open3.popen3(cmd) do |_stdin, stdout, stderr|
           IO.copy_stream(stdout, stream(show: show_out, type: :out)) if show_out
           IO.copy_stream(stderr, stream(show: show_err, type: :err)) if show_err
@@ -113,7 +118,7 @@ class CmdExecute
     private
 
     def stream(show:, type: nil)
-      return nil if show == false
+      return if show == false
       return show if show.is_a?(IO)
 
       case type
@@ -154,7 +159,6 @@ class VideoConfig
 
     configs.flat_map do |src, config|
       src_file = File.join(abs_dir, src.to_s)
-      puts src_file
       next unless File.exist?(src_file)
 
       cnf = new(src_file, config)
@@ -308,18 +312,74 @@ class VideoConfig
   #       - 28 Days Later.eng-sdh.srt
   #       - 28 Days Later.fre.srt:
   #           language: fre
-  SubtitleConfig = Struct.new(:file, :language, :encoding)
+  #
+  # @example use subtitles embedded in source mkv file
+  #   28 Days Later.mkv:
+  #     subtitles:
+  #       - copy: true
+  #       - copy: :fre
+  #       - copy: 4
+  SubtitleConfig = Struct.new(:file, :language, :encoding, :copy, :track, keyword_init: true) do
+    def initialize(*)
+      super
+
+      self.copy = false if self.copy.nil?
+      self.language ||= 'eng'
+      self.encoding ||= 'utf8'
+    end
+  end
 
   def setup_subtitles
-    config.fetch(:subtitles, []).to_a.map do |sub_cnf|
+    config.fetch(:subtitles, []).to_a.map.with_index do |sub_cnf, idx|
       case sub_cnf
       when String
-        SubtitleConfig.new(sub_cnf, 'eng', 'utf8')
+        SubtitleConfig.new(file: sub_cnf)
       when Array, Hash
+        next subtitle_copy_config(sub_cnf[:copy], idx) unless sub_cnf[:copy].nil? || sub_cnf[:copy] == false
+
+
         file, cnf = sub_cnf.to_a
-        SubtitleConfig.new(file.to_s, cnf.fetch(:language, 'eng'), cnf.fetch(:encoding, 'utf8'))
+
+        clean_subtitle_file(file)
+        SubtitleConfig.new(file: file.to_s, language: cnf[:language], encoding: cnf[:encoding])
       end
     end.compact
+  end
+
+  def subtitle_copy_config(cnf, index)
+    case cnf
+    when String
+      SubtitleConfig.new(copy: true, language: cnf[:copy])
+    when Numeric
+      SubtitleConfig.new(copy: true, track: cnf[:copy])
+    else
+      SubtitleConfig.new(copy: true, track: index + 1)
+    end
+  end
+
+  # Scrub fancy quotes and em/en-dashes from incoming subtitle files
+  #
+  # @see https://stackoverflow.com/a/4399299
+  def clean_subtitle_file(path)
+    allowed_extensions = ['.srt']
+    extension = File.extname(path)
+    return unless allowed_extensions.include?(extension)
+
+    tmp = Tempfile.new("#{File.basename(path, '.*')}-cleaned#{extension}")
+    begin
+      File.open(path, 'r') do |subfile|
+        subfile.each_line do |line|
+          tmp.puts(line.gsub(/[-–—]/, '-').gsub(/['‘’]/, "'").gsub(/["“”]/, '"'))
+        end
+      end
+      tmp.close
+
+      FileUtils.mv(path, "#{path}.original")
+      FileUtils.mv(tmp.path, path)
+    ensure
+      tmp.close
+      tmp.unlink
+    end
   end
 end
 
@@ -346,7 +406,7 @@ class VideoTranscoding
       return [] if config.audio.empty?
 
       audio_cmds = config.audio.map.with_index { |cnf, idx| "--add-audio #{cnf[:track] || idx + 1}" }
-      audio_names = config.audio.map.with_index { |cnf, idx| %("#{cnf[:title]&.gsub('"', '\"')}") || %("Track #{idx + 1}") }
+      audio_names = config.audio.map.with_index { |cnf, idx| %("#{cnf.fetch(:title, '').gsub('"', '\"').gsub(',', '\,')}") || %("Track #{idx + 1}") }
       audio_cmds << %(-x aname=#{audio_names.join(',')})
     end
 
@@ -358,22 +418,49 @@ class VideoTranscoding
       flags
     end
 
-    # Subtitle options are passed to HandBrake
+    # Pass --add-subtitle flags for SubtitleConfigs with :copy, otherwise configure
+    # flags
+    #
+    # @return [Array<String>]
     def subtitle_flags
       return [] if config.subtitles.empty?
-
       src_dir = File.dirname(config.src)
 
-      # src paths need to be relative
-      files = config.subtitles.map(&:file).map { |fn| %("#{File.join(src_dir, fn)}") }.join(',')
-      langs = config.subtitles.map(&:language).join(',')
-      encodings = config.subtitles.map(&:encoding).join(',')
+      files, langs, encodings, copies = [], [], [], []
+      just_copies = true
 
-      [
-        "-x srt-file=#{files}",
-        "-x srt-lang=#{langs}",
-        "-x srt-codeset=#{encodings}"
-      ]
+      config.subtitles.each do |subtitle|
+        if subtitle.copy
+          copies << "--add-subtitle #{subtitle.language || subtitle.track}"
+        else
+          files << %("#{File.join(src_dir, subtitle.file)}")
+          langs << subtitle.language
+          encodings << subtitle.encoding
+          just_copies = false
+        end
+      end
+
+      return copies if just_copies
+
+      files_flag = "-x srt-file=#{files.join(',')}" unless files.empty?
+      langs_flag = "-x srt-lang=#{langs.join(',')}" unless langs.empty?
+      encoding_flag = "-x srt-codeset=#{encodings.join(',')}" unless encodings.empty?
+
+      [*copies, files_flag, langs_flag, encoding_flag].compact
+    end
+  end
+end
+
+# @todo wip testing out other_transcoding as an option
+class OtherTranscoding
+  class Target
+    def initialize(config)
+      @config = config
+    end
+
+    attr_reader :config
+
+    def command
     end
   end
 end

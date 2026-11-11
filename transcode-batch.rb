@@ -10,6 +10,308 @@ require 'find'
 require 'open3'
 require 'yaml'
 
+#
+#
+# @example
+#   28 Days Later.mkv:
+#     # defaults to the file's basename for output file
+#     title: 28 Days Later (2003)
+#
+#     # appends "{edition-<value>}" to filename (used in plex)
+#     edition: Widescreen DVD
+#
+#    # Toggle output to be .mp4 file instead of default .mkv
+#     mp4: false
+#
+#     # transcode_video defaults to adding the first track, so this can be empty
+#     # if you only want the main audio track. if 'track' isn't provided, it is assumed
+#     # that the track being added matches index + 1.
+#     audio:
+#       - title: English
+#       - track: 4
+#         title: Commentary with director Danny Boyle and writer Alex Garland
+#
+#     # add external srt files with the relative path to each file as the key.
+#     # there is built in support with transcode-video for copying subtitles
+#     # but i like the flexability of embedding a text file over an image.
+#     #
+#     # configs can be provided as an array of file strings (for english utf-8 files)
+#     # or hashes specifying the 3-letter language code (defaults to eng) and
+#     # file encoding (defaults to utf8). no support for forced bc i always have subtitles on
+#    subtitles:
+#      - 28 Days Later.eng.srt
+#      - 28 Days Later.fre.srt:
+#          language: fre
+#          encoding: utf8
+#
+#     # extras videos are extracted to the project root and need to be moved to a
+#     # different output location depending on the type. default is 'other'.
+#     #
+#     # supported types:
+#     #   bts
+#     #   deleted
+#     #   featurette
+#     #   interview
+#     #   other
+#     #   trailer
+#     #
+#     # extras are run through the same config parser as main videos, so any features applicable
+#     # there (such as 'audio' or 'subtitles') can be used here.
+#     extras:
+#       Making Of Featurette.mkv:
+#         type: featurette
+#       Alternate Ending.mkv:
+#         type: deleted
+#       Theatrical Trailer.mkv:
+#         type: trailer
+#       Continuity Polaroids.mkv:
+#         type: bts
+# Config file parser
+#
+# @note extras have src video title appended to their mkv titles
+class VideoConfig
+  OUTPUT_DIRNAME = 'output'.freeze
+
+  def self.for(path)
+    abs_path = File.absolute_path(path)
+    abs_dir = File.dirname(abs_path)
+
+    configs = YAML.safe_load(File.read(abs_path), symbolize_names: true)
+
+    configs.flat_map do |src, config|
+      src_file = File.join(abs_dir, src.to_s).to_s
+      next unless File.exist?(src_file)
+
+      cnf = new(src_file, config)
+      xtras = cnf.extras
+
+      [cnf, *xtras]
+    end.compact
+  end
+
+  def initialize(src, config, parent: true)
+    @src = File.absolute_path(src.to_s)
+    @config = config
+    @parent = parent
+  end
+
+  attr_reader :src, :config, :parent
+
+  def audio
+    config[:audio] || []
+  end
+
+  def edition
+    config[:edition]
+  end
+
+  def extra?
+    has_parent?
+  end
+
+  def extras
+    @extras ||= setup_extras(config[:extras])
+  end
+
+  def has_parent?
+    parent && !parent? # lol wut
+  end
+
+  def input_filename
+    File.basename(src)
+  end
+
+  def mp4?
+    config[:mp4] == true
+  end
+
+  def original_output_filename
+    "#{File.basename(src, '.*')}.#{mp4? ? 'mp4' : 'mkv'}"
+  end
+
+  def output_filename
+    "#{title_with_edition}#{mp4? ? '.mp4' : '.mkv'}"
+  end
+
+  def output_full_path(pwd)
+    File.join(output_path(pwd), output_filename)
+  end
+
+  # need to account for:
+  #   no extras:
+  #     output/
+  #     |-- 28 Days Later (2003).mkv
+  #
+  #   extras:
+  #     output/
+  #     |-- 28 Days Later (2003)/
+  #         |-- 28 Days Later (2003) {edition-Widescreen DVD}.mkv
+  #
+  # @note if this ever breaks, you'll know bc there'll be a plex-named
+  #       directory sitting in your output folder
+  def output_path(pwd)
+    dir = File.join(pwd, OUTPUT_DIRNAME)
+
+    if parent?
+      # no extras: output/
+      return dir if extras.empty?
+
+      # extras: output/28 Days Later (2003)
+      return File.join(dir, title)
+    end
+
+    # otherwise give it a plex-based subdirectory
+    folder = case type.to_sym
+             when :bts
+               'Behind The Scenes'
+             when :deleted
+               'Deleted Scenes'
+             when :featurette
+               'Featurettes'
+             when :interview
+               'Interviews'
+             when :trailer
+               'Trailers'
+             else
+               'Other'
+             end
+
+    File.join(parent.output_path(pwd), folder)
+  end
+
+  def parent?
+    parent.nil? || parent == true
+  end
+
+  def src_filename
+    File.basename(src)
+  end
+
+  def subtitles
+    @subtitles ||= setup_subtitles
+  end
+
+  def title
+    @title ||= config[:title] || File.basename(src, '.*')
+  end
+
+  def title_with_edition
+    return title unless edition
+    prepared_edition = edition.include?(',') ? edition.gsub(',', '\,') : edition
+    %(#{title} {edition-#{prepared_edition}})
+  end
+
+  def title_with_parent
+    has_parent? ? "#{parent.title} - #{title}" : title
+  end
+
+  def type
+    config[:type]&.to_sym || :feature
+  end
+
+  def video
+    config[:video] || []
+  end
+
+  private
+
+  def setup_extras(config)
+    return [] if config.nil? || config.empty?
+
+    config.map do |src, config|
+      config[:type] ||= :other
+      self.class.new(src, config, parent: self)
+    end
+  end
+
+  # supports hash and array style yaml config
+  #
+  # @example subtitles as hash
+  #   28 Days Later.mkv:
+  #     subtitles:
+  #       28 Days Later.eng.srt:
+  #         language: eng
+  #         encoding utf8
+  #       28 Days Later.fre.srt:
+  #         language: fre
+  #
+  # @example subtitles as array for eng/utf8-encoded sub files,
+  #   28 Days Later.mkv:
+  #     subtitles:
+  #       - 28 Days Later.eng.srt
+  #       - 28 Days Later.eng-sdh.srt
+  #       - 28 Days Later.fre.srt:
+  #           language: fre
+  #
+  # @example use subtitles embedded in source mkv file
+  #   28 Days Later.mkv:
+  #     subtitles:
+  #       - copy: true
+  #       - copy: :fre
+  #       - copy: 4
+  SubtitleConfig = Struct.new(:file, :language, :encoding, :copy, :track, keyword_init: true) do
+    def initialize(*)
+      super
+
+      self.copy = false if copy.nil?
+      self.language = 'eng' if language.nil? && track.nil?
+      self.encoding ||= 'utf8'
+    end
+  end
+
+  def setup_subtitles
+    config.fetch(:subtitles, []).to_a.map.with_index do |sub_cnf, idx|
+      case sub_cnf
+      when String
+        SubtitleConfig.new(file: sub_cnf)
+      when Array, Hash
+        next subtitle_copy_config(sub_cnf[:copy], idx) unless sub_cnf[:copy].nil? || sub_cnf[:copy] == false
+
+
+        file, cnf = sub_cnf.to_a
+
+        clean_subtitle_file(file)
+        SubtitleConfig.new(file: file.to_s, language: cnf[:language], encoding: cnf[:encoding])
+      end
+    end.compact
+  end
+
+  def subtitle_copy_config(value, index)
+    case value
+    when String  then SubtitleConfig.new(copy: true, language: value)
+    when Numeric then SubtitleConfig.new(copy: true, track: value)
+    else SubtitleConfig.new(copy: true, track: index + 1)
+    end
+  end
+
+  # Scrub fancy quotes and em/en-dashes from incoming subtitle files
+  #
+  # @see https://stackoverflow.com/a/4399299
+  def clean_subtitle_file(path)
+    allowed_extensions = ['.srt', '.ass']
+    extension = File.extname(path)
+    return unless allowed_extensions.include?(extension)
+
+    tmp = Tempfile.new("#{File.basename(path, '.*')}-cleaned#{extension}")
+    begin
+      File.open(path, 'r') do |subfile|
+        subfile.each_line do |line|
+          tmp.puts(line.gsub(/[–—]/, '-').gsub(/[‘’]/, "'").gsub(/[“”]/, '"'))
+        end
+      end
+      tmp.close
+
+      FileUtils.mv(path, "#{path}.original")
+      FileUtils.mv(tmp.path, path)
+    ensure
+      tmp.close
+      tmp.unlink
+    end
+  end
+end
+
+
+
 # Main class for executing commands
 #
 # The annoying thing about the new transcode-video api is that we can't
@@ -23,15 +325,16 @@ class TranscodeBatchRunner
         exit 1
       end
 
-      VideoConfig.for(File.join(pwd, config_path)).each do |config|
+      VideoConfig.for(config_path).each do |config|
         output_path = config.output_path(pwd)
         FileUtils.mkdir_p(output_path) unless Dir.exist?(output_path)
+        prop_editor_class = config.mp4? ? Mp4PropEdit : MkvPropEdit
 
         Dir.chdir(output_path) do
           vt_target = VideoTranscoding::Target.new(config)
           CmdExecute.run(vt_target.command, show_out: show_out, show_err: show_err, dry: dry)
-          rename_file(config.src_filename, config.output_filename, dry: dry) unless config.output_filename == config.src_filename
-          MkvPropEdit.set_title(config.output_full_path(pwd), title: config.title_with_parent, dry: dry) if File.exist?(config.output_full_path(pwd))
+          rename_file(config.original_output_filename, config.output_filename, dry: dry) unless config.output_filename == config.original_output_filename
+          prop_editor_class.set_title(config.output_full_path(pwd), title: config.title_with_parent, dry: dry) if File.exist?(config.output_full_path(pwd))
         end
 
         Cleaner.new(config: config, pwd: pwd, dry: dry).cleanup!
@@ -47,11 +350,9 @@ class TranscodeBatchRunner
     end
 
     def rename_file(src, dest, dry: false)
-      if dry
-        puts "[FileUtils.mv] mv #{src} #{dest}"
-      else
-        FileUtils.mv(src, dest)
-      end
+      puts "[FileUtils.mv] mv #{src} #{dest}"
+
+      FileUtils.mv(src, dest) unless dry
     end
   end
 end
@@ -145,240 +446,15 @@ class MkvPropEdit
   end
 end
 
-# Config file parser
-#
-# @note extras have src video title appended to their mkv titles
-class VideoConfig
-  OUTPUT_DIRNAME = 'output'.freeze
+class Mp4PropEdit
+  def self.set_title(src, title: nil, show_out: true, show_err: true, dry: false)
+    title = File.basename(src, '.*') if title.nil?
+    prop_commands = %(mp4tags -s "#{title.gsub('"', '\"')}" "#{src.gsub('"', '\"')}")
 
-  def self.for(path)
-    abs_path = File.absolute_path(path)
-    abs_dir = File.dirname(abs_path)
-
-    configs = YAML.safe_load(File.read(abs_path), symbolize_names: true)
-
-    configs.flat_map do |src, config|
-      src_file = File.join(abs_dir, src.to_s)
-      next unless File.exist?(src_file)
-
-      cnf = new(src_file, config)
-      xtras = cnf.extras
-
-      [cnf, *xtras]
-    end.compact
-  end
-
-  def initialize(src, config, parent: true)
-    @src = File.absolute_path(src.to_s)
-    @config = config
-    @parent = parent
-  end
-
-  attr_reader :src, :config, :parent
-
-  def audio
-    config[:audio] || []
-  end
-
-  def edition
-    config[:edition]
-  end
-
-  def extra?
-    has_parent?
-  end
-
-  def extras
-    @extras ||= setup_extras(config[:extras])
-  end
-
-  def has_parent?
-    parent && !parent? # lol wut
-  end
-
-  def mp4?
-    config[:mp4] == true
-  end
-
-  def output_filename
-    "#{title_with_edition}#{mp4? ? '.mp4' : '.mkv'}"
-  end
-
-  def output_full_path(pwd)
-    File.join(output_path(pwd), output_filename)
-  end
-
-  # need to account for:
-  #   no extras:
-  #     output/
-  #     |-- 28 Days Later (2003).mkv
-  #
-  #   extras:
-  #     output/
-  #     |-- 28 Days Later (2003)/
-  #         |-- 28 Days Later (2003) {edition-Widescreen DVD}.mkv
-  #
-  # @note if this ever breaks, you'll know bc there'll be a plex-named
-  #       directory sitting in your output folder
-  def output_path(pwd)
-    dir = File.join(pwd, OUTPUT_DIRNAME)
-
-    if parent?
-      # no extras: output/
-      return dir if extras.empty?
-
-      # extras: output/28 Days Later (2003)
-      return File.join(dir, title)
-    end
-
-    # otherwise give it a plex-based subdirectory
-    folder = case type.to_sym
-             when :bts
-               'Behind The Scenes'
-             when :deleted
-               'Deleted Scenes'
-             when :featurette
-               'Featurettes'
-             when :interview
-               'Interviews'
-             when :trailer
-               'Trailers'
-             else
-               'Other'
-             end
-
-    File.join(parent.output_path(pwd), folder)
-  end
-
-  def parent?
-    parent.nil? || parent == true
-  end
-
-  def src_filename
-    File.basename(src)
-  end
-
-  def subtitles
-    @subtitles ||= setup_subtitles
-  end
-
-  def title
-    @title ||= config[:title] || File.basename(src, '.*')
-  end
-
-  def title_with_edition
-    return title unless edition
-    %(#{title} {edition-"#{edition.gsub('"', '\"')}"})
-  end
-
-  def title_with_parent
-    has_parent? ? "#{parent.title} - #{title}" : title
-  end
-
-  def type
-    config[:type]&.to_sym || :feature
-  end
-
-  def video
-    config[:video] || []
-  end
-
-  private
-
-  def setup_extras(config)
-    return [] if config.nil? || config.empty?
-
-    config.map do |src, config|
-      config[:type] ||= :other
-      self.class.new(src, config, parent: self)
-    end
-  end
-
-  # supports hash and array style yaml config
-  #
-  # @example subtitles as hash
-  #   28 Days Later.mkv:
-  #     subtitles:
-  #       28 Days Later.eng.srt:
-  #         language: eng
-  #         encoding utf8
-  #       28 Days Later.fre.srt:
-  #         language: fre
-  #
-  # @example subtitles as array for eng/utf8-encoded sub files,
-  #   28 Days Later.mkv:
-  #     subtitles:
-  #       - 28 Days Later.eng.srt
-  #       - 28 Days Later.eng-sdh.srt
-  #       - 28 Days Later.fre.srt:
-  #           language: fre
-  #
-  # @example use subtitles embedded in source mkv file
-  #   28 Days Later.mkv:
-  #     subtitles:
-  #       - copy: true
-  #       - copy: :fre
-  #       - copy: 4
-  SubtitleConfig = Struct.new(:file, :language, :encoding, :copy, :track, keyword_init: true) do
-    def initialize(*)
-      super
-
-      self.copy = false if self.copy.nil?
-      self.language ||= 'eng'
-      self.encoding ||= 'utf8'
-    end
-  end
-
-  def setup_subtitles
-    config.fetch(:subtitles, []).to_a.map.with_index do |sub_cnf, idx|
-      case sub_cnf
-      when String
-        SubtitleConfig.new(file: sub_cnf)
-      when Array, Hash
-        next subtitle_copy_config(sub_cnf[:copy], idx) unless sub_cnf[:copy].nil? || sub_cnf[:copy] == false
-
-
-        file, cnf = sub_cnf.to_a
-
-        clean_subtitle_file(file)
-        SubtitleConfig.new(file: file.to_s, language: cnf[:language], encoding: cnf[:encoding])
-      end
-    end.compact
-  end
-
-  def subtitle_copy_config(cnf, index)
-    case cnf
-    when String
-      SubtitleConfig.new(copy: true, language: cnf[:copy])
-    when Numeric
-      SubtitleConfig.new(copy: true, track: cnf[:copy])
+    if dry
+      puts "[Mp4PropEdit.set_title] #{prop_commands}"
     else
-      SubtitleConfig.new(copy: true, track: index + 1)
-    end
-  end
-
-  # Scrub fancy quotes and em/en-dashes from incoming subtitle files
-  #
-  # @see https://stackoverflow.com/a/4399299
-  def clean_subtitle_file(path)
-    allowed_extensions = ['.srt']
-    extension = File.extname(path)
-    return unless allowed_extensions.include?(extension)
-
-    tmp = Tempfile.new("#{File.basename(path, '.*')}-cleaned#{extension}")
-    begin
-      File.open(path, 'r') do |subfile|
-        subfile.each_line do |line|
-          tmp.puts(line.gsub(/[-–—]/, '-').gsub(/['‘’]/, "'").gsub(/["“”]/, '"'))
-        end
-      end
-      tmp.close
-
-      FileUtils.mv(path, "#{path}.original")
-      FileUtils.mv(tmp.path, path)
-    ensure
-      tmp.close
-      tmp.unlink
+      CmdExecute.run(prop_commands, show_out: show_out, show_err: show_err)
     end
   end
 end
@@ -414,12 +490,12 @@ class VideoTranscoding
     # (tho you'll have to figure out how to parse to flags)
     def video_flags
       flags = []
-      flags << '--mp4' if config.mp4?
+      flags << '-x crop-mode=none'
+      flags << '-x format=av_mp4' if config.mp4?
       flags
     end
 
-    # Pass --add-subtitle flags for SubtitleConfigs with :copy, otherwise configure
-    # flags
+    # Pass --add-subtitle flags for SubtitleConfigs with :copy, otherwise configure flags
     #
     # @return [Array<String>]
     def subtitle_flags
@@ -440,13 +516,13 @@ class VideoTranscoding
         end
       end
 
-      return copies if just_copies
+      return [*copies, '--burn-subtitle none'] if just_copies
 
       files_flag = "-x srt-file=#{files.join(',')}" unless files.empty?
       langs_flag = "-x srt-lang=#{langs.join(',')}" unless langs.empty?
       encoding_flag = "-x srt-codeset=#{encodings.join(',')}" unless encodings.empty?
 
-      [*copies, files_flag, langs_flag, encoding_flag].compact
+      [*copies, files_flag, langs_flag, encoding_flag, '--burn-subtitle none'].compact
     end
   end
 end

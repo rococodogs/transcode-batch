@@ -16,6 +16,7 @@ clone the repository and ln `transcode-batch` to your bin directory.
   - `ffprobe`
   - `ffmpeg`
 - `mkvpropedit`
+- `mp4tags`
 - a directory of mkv files extracted from [makemkv](https://www.makemkv.com/) and srt subtitle files (i use `mkvextract` to pull the tracks and SubTools to OCR + correct the text. you could also use opensubs lol).
 
 ```
@@ -27,10 +28,9 @@ $ tree .
 ├── batch.yml
 ├── Continuity Polaroids.mkv
 ├── Making Of Featurette.mkv
-├── output/
 ├── Theatrical Trailer.mkv
 
-1 directory, 7 files
+1 directory, 6 files
 ```
 
 
